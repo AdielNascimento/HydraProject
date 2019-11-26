@@ -1,140 +1,137 @@
 import os
 import numpy as np
-import matplotlib.pyplot as plt
-from tqdm import tqdm
+import errno
+import torchvision.utils as vutils
+from tensorboardX import SummaryWriter
+from IPython import display
+from matplotlib import pyplot as plt
+import torch
+
+'''
+    TensorBoard Data will be stored in './runs' path
+'''
 
 
-from keras.layers import Input
-from keras.models import Model, Sequential
-from keras.layers.core import Dense, Dropout
-from keras.layers.advanced_activations import LeakyReLU
-from keras.datasets import mnist
-from keras.optimizers import Adam
-from keras import initializers
+class Logger:
 
-os.environ["KERAS_BACKEND"] = "tensorflow"
+    def __init__(self, model_name, data_name):
+        self.model_name = model_name
+        self.data_name = data_name
 
-# To make sure that we can reproduce the experiment and get the same results
-np.random.seed(10)
+        self.comment = '{}_{}'.format(model_name, data_name)
+        self.data_subdir = '{}/{}'.format(model_name, data_name)
 
-# The dimension of our random noise vector.
-random_dim = 100
+        # TensorBoard
+        self.writer = SummaryWriter(comment=self.comment)
 
-def load_minst_data():
-    # load the data
-    (x_train, y_train), (x_test, y_test) = mnist.load_data()
-    # normalize our inputs to be in the range[-1, 1]
-    x_train = (x_train.astype(np.float32) - 127.5)/127.5
-    # convert x_train with a shape of (60000, 28, 28) to (60000, 784) so we have
-    # 784 columns per row
-    x_train = x_train.reshape(60000, 784)
-    return (x_train, y_train, x_test, y_test)
+    def log(self, d_error, g_error, epoch, n_batch, num_batches):
 
+        # var_class = torch.autograd.variable.Variable
+        if isinstance(d_error, torch.autograd.Variable):
+            d_error = d_error.data.cpu().numpy()
+        if isinstance(g_error, torch.autograd.Variable):
+            g_error = g_error.data.cpu().numpy()
 
-# You will use the Adam optimizer
-def get_optimizer():
-    return Adam(lr=0.0002, beta_1=0.5)
+        step = Logger._step(epoch, n_batch, num_batches)
+        self.writer.add_scalar(
+            '{}/D_error'.format(self.comment), d_error, step)
+        self.writer.add_scalar(
+            '{}/G_error'.format(self.comment), g_error, step)
 
-def get_generator(optimizer):
-    generator = Sequential()
-    generator.add(Dense(256, input_dim=random_dim, kernel_initializer=initializers.RandomNormal(stddev=0.02)))
-    generator.add(LeakyReLU(0.2))
+    def log_images(self, images, num_images, epoch, n_batch, num_batches, format='NCHW', normalize=True):
+        '''
+        input images are expected in format (NCHW)
+        '''
+        if type(images) == np.ndarray:
+            images = torch.from_numpy(images)
+        
+        if format=='NHWC':
+            images = images.transpose(1,3)
+        
 
-    generator.add(Dense(512))
-    generator.add(LeakyReLU(0.2))
+        step = Logger._step(epoch, n_batch, num_batches)
+        img_name = '{}/images{}'.format(self.comment, '')
 
-    generator.add(Dense(1024))
-    generator.add(LeakyReLU(0.2))
+        # Make horizontal grid from image tensor
+        horizontal_grid = vutils.make_grid(
+            images, normalize=normalize, scale_each=True)
+        # Make vertical grid from image tensor
+        nrows = int(np.sqrt(num_images))
+        grid = vutils.make_grid(
+            images, nrow=nrows, normalize=True, scale_each=True)
 
-    generator.add(Dense(784, activation='tanh'))
-    generator.compile(loss='binary_crossentropy', optimizer=optimizer)
-    return generator
+        # Add horizontal images to tensorboard
+        self.writer.add_image(img_name, horizontal_grid, step)
 
-def get_discriminator(optimizer):
-    discriminator = Sequential()
-    discriminator.add(Dense(1024, input_dim=784, kernel_initializer=initializers.RandomNormal(stddev=0.02)))
-    discriminator.add(LeakyReLU(0.2))
-    discriminator.add(Dropout(0.3))
+        # Save plots
+        self.save_torch_images(horizontal_grid, grid, epoch, n_batch)
 
-    discriminator.add(Dense(512))
-    discriminator.add(LeakyReLU(0.2))
-    discriminator.add(Dropout(0.3))
+    def save_torch_images(self, horizontal_grid, grid, epoch, n_batch, plot_horizontal=True):
+        out_dir = './data/images/{}'.format(self.data_subdir)
+        Logger._make_dir(out_dir)
 
-    discriminator.add(Dense(256))
-    discriminator.add(LeakyReLU(0.2))
-    discriminator.add(Dropout(0.3))
-
-    discriminator.add(Dense(1, activation='sigmoid'))
-    discriminator.compile(loss='binary_crossentropy', optimizer=optimizer)
-    return discriminator
-
-def get_gan_network(discriminator, random_dim, generator, optimizer):
-    # We initially set trainable to False since we only want to train either the
-    # generator or discriminator at a time
-    discriminator.trainable = False
-    # gan input (noise) will be 100-dimensional vectors
-    gan_input = Input(shape=(random_dim,))
-    # the output of the generator (an image)
-    x = generator(gan_input)
-    # get the output of the discriminator (probability if the image is real or not)
-    gan_output = discriminator(x)
-    gan = Model(inputs=gan_input, outputs=gan_output)
-    gan.compile(loss='binary_crossentropy', optimizer=optimizer)
-    return gan
-
-def plot_generated_images(epoch, generator, examples=100, dim=(10, 10), figsize=(10, 10)):
-    noise = np.random.normal(0, 1, size=[examples, random_dim])
-    generated_images = generator.predict(noise)
-    generated_images = generated_images.reshape(examples, 28, 28)
-
-    plt.figure(figsize=figsize)
-    for i in range(generated_images.shape[0]):
-        plt.subplot(dim[0], dim[1], i+1)
-        plt.imshow(generated_images[i], interpolation='nearest', cmap='gray_r')
+        # Plot and save horizontal
+        fig = plt.figure(figsize=(16, 16))
+        plt.imshow(np.moveaxis(horizontal_grid.numpy(), 0, -1))
         plt.axis('off')
-    plt.tight_layout()
-    plt.savefig('gan_generated_image_epoch_%d.png' % epoch)
+        if plot_horizontal:
+            display.display(plt.gcf())
+        self._save_images(fig, epoch, n_batch, 'hori')
+        plt.close()
 
-def train(epochs=1, batch_size=128):
-    # Get the training and testing data
-    x_train, y_train, x_test, y_test = load_minst_data()
-    # Split the training data into batches of size 128
-    batch_count = x_train.shape[0] / batch_size
+        # Save squared
+        fig = plt.figure()
+        plt.imshow(np.moveaxis(grid.numpy(), 0, -1))
+        plt.axis('off')
+        self._save_images(fig, epoch, n_batch)
+        plt.close()
 
-    # Build our GAN netowrk
-    adam = get_optimizer()
-    generator = get_generator(adam)
-    discriminator = get_discriminator(adam)
-    gan = get_gan_network(discriminator, random_dim, generator, adam)
+    def _save_images(self, fig, epoch, n_batch, comment=''):
+        out_dir = './data/images/{}'.format(self.data_subdir)
+        Logger._make_dir(out_dir)
+        fig.savefig('{}/{}_epoch_{}_batch_{}.png'.format(out_dir,
+                                                         comment, epoch, n_batch))
 
-    for e in xrange(1, epochs+1):
-        print ('-'*15, 'Epoch %d' % e, '-'*15)
-        for _ in tqdm(xrange(batch_count)):
-            # Get a random set of input noise and images
-            noise = np.random.normal(0, 1, size=[batch_size, random_dim])
-            image_batch = x_train[np.random.randint(0, x_train.shape[0], size=batch_size)]
+    def display_status(self, epoch, num_epochs, n_batch, num_batches, d_error, g_error, d_pred_real, d_pred_fake):
+        
+        # var_class = torch.autograd.variable.Variable
+        if isinstance(d_error, torch.autograd.Variable):
+            d_error = d_error.data.cpu().numpy()
+        if isinstance(g_error, torch.autograd.Variable):
+            g_error = g_error.data.cpu().numpy()
+        if isinstance(d_pred_real, torch.autograd.Variable):
+            d_pred_real = d_pred_real.data
+        if isinstance(d_pred_fake, torch.autograd.Variable):
+            d_pred_fake = d_pred_fake.data
+        
+        
+        print('Epoch: [{}/{}], Batch Num: [{}/{}]'.format(
+            epoch,num_epochs, n_batch, num_batches)
+             )
+        print('Discriminator Loss: {:.4f}, Generator Loss: {:.4f}'.format(d_error, g_error))
+        print('D(x): {:.4f}, D(G(z)): {:.4f}'.format(d_pred_real.mean(), d_pred_fake.mean()))
 
-            # Generate fake MNIST images
-            generated_images = generator.predict(noise)
-            X = np.concatenate([image_batch, generated_images])
+    def save_models(self, generator, discriminator, epoch):
+        out_dir = './data/models/{}'.format(self.data_subdir)
+        Logger._make_dir(out_dir)
+        torch.save(generator.state_dict(),
+                   '{}/G_epoch_{}'.format(out_dir, epoch))
+        torch.save(discriminator.state_dict(),
+                   '{}/D_epoch_{}'.format(out_dir, epoch))
 
-            # Labels for generated and real data
-            y_dis = np.zeros(2*batch_size)
-            # One-sided label smoothing
-            y_dis[:batch_size] = 0.9
+    def close(self):
+        self.writer.close()
 
-            # Train discriminator
-            discriminator.trainable = True
-            discriminator.train_on_batch(X, y_dis)
+    # Private Functionality
 
-            # Train generator
-            noise = np.random.normal(0, 1, size=[batch_size, random_dim])
-            y_gen = np.ones(batch_size)
-            discriminator.trainable = False
-            gan.train_on_batch(noise, y_gen)
+    @staticmethod
+    def _step(epoch, n_batch, num_batches):
+        return epoch * num_batches + n_batch
 
-        if e == 1 or e % 20 == 0:
-            plot_generated_images(e, generator)
-
-if __name__ == '__main__':
-    train(400, 128)
+    @staticmethod
+    def _make_dir(directory):
+        try:
+            os.makedirs(directory)
+        except OSError as e:
+            if e.errno != errno.EEXIST:
+                raise
