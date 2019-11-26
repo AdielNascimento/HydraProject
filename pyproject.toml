@@ -6,6 +6,7 @@ authors = ["Adiel Adiel <adieltab16@gmail.com>"]
 
 [tool.poetry.dependencies]
 python = "^3.7"
+ryu = "^4.32"
 
 [tool.poetry.dev-dependencies]
 
